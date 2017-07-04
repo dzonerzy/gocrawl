@@ -220,7 +220,7 @@ func Request(wg *sync.WaitGroup,ch chan map[string]string , args CrawlerArgument
 			ch <- result
 			done = true
 		} else {
-			time.Sleep(time.Second * 5)
+			time.Sleep(time.Millisecond * 100)
 		}
 	}
 }
