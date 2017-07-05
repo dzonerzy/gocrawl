@@ -14,6 +14,10 @@ import(
 	"strconv"
 	"sync"
 	"github.com/fatih/color"
+	"golang.org/x/net/html"
+	"io"
+	"net/url"
+	"path/filepath"
 )
 
 type acceptedStatus []int
@@ -39,6 +43,7 @@ type CrawlerArguments struct {
 	concurrency int
 	max_concurrency int
 	valid_codes acceptedStatus
+	enable_scraper bool
 }
 
 type CrawlerStatus struct {
@@ -70,10 +75,11 @@ func main() {
 	}
 
 	var(
-		url = flag.String("url","", "Specify the url to crawl")
+		crawl_url = flag.String("url","", "Specify the url to crawl")
 		crawl_file = flag.String("wordlist", "", "Specify the wordlist used to crawl, if no specified the built-in one will be used")
 		depth = flag.Int("depth", 5, "Specify the maximum recursion depth")
-		concurrent = flag.Int("concurrency", 200, "Specify the concurrency connection at a time, a number between 10 and 900 default(200)")
+		concurrent = flag.Int("concurrency", 50, "Specify the concurrency connection at a time, a number between 10 and 900")
+		scraper = flag.Bool("scraper", false, "Specify whenever to enable scraper engine")
 	)
 	var acceptedCodes acceptedStatus
 	flag.Var(&acceptedCodes, "c", "A list of HTTP considered as 'Page Found' ie: 200,302,304,401")
@@ -83,6 +89,12 @@ func main() {
 	if flag.NFlag() == 0 {
 		flag.PrintDefaults()
 		os.Exit(0)
+	}
+
+	_, err := url.ParseRequestURI(*crawl_url)
+	if err != nil {
+		showError(fmt.Sprintf("Please use a valid URL ( %v )", err))
+		os.Exit(-1)
 	}
 
 	if len(acceptedCodes) == 0 {
@@ -102,8 +114,9 @@ func main() {
 		os.Exit(-1)
 	}
 
-	arguments := CrawlerArguments{crawl_url: *url, crawl_entries: strings.Split(string(data), "\n"),
-		max_depth: *depth, concurrency:0, max_concurrency: *concurrent, valid_codes: acceptedCodes}
+	arguments := CrawlerArguments{crawl_url: *crawl_url, crawl_entries: strings.Split(string(data), "\n"),
+		max_depth: *depth, concurrency:0, max_concurrency: *concurrent, valid_codes: acceptedCodes,
+		enable_scraper: *scraper}
 
 	if len(arguments.crawl_url) > 0 {
 		go UpdateStats(&status, arguments)
@@ -124,12 +137,8 @@ func main() {
 
 		showInfo(fmt.Sprintf("Starting crawling (%v)", arguments.crawl_url))
 
-		if strings.HasPrefix(arguments.crawl_url, "http") || strings.HasPrefix(arguments.crawl_url, "https") {
-			Crawl(&wg, arguments, 1, netClient)
-		}else{
-			arguments.crawl_url = "http://" + arguments.crawl_url
-			Crawl(&wg, arguments, 1, netClient)
-		}
+		Crawl(&wg, arguments, 1, netClient)
+
 	}else{
 		showError("Error: you must insert a URL to crawl, use -h to check commandline options")
 		os.Exit(-1)
@@ -149,11 +158,11 @@ func showInfo(msg string) {
 	fmt.Printf("[%s]: %s\n", HiRed("INFO"), msg)
 }
 
-func showURL(url string, code string) {
+func showURL(url string, code string, tool string) {
 	HiBlue := color.New(color.FgHiBlue, color.Bold).SprintfFunc()
 	HiMagenta := color.New(color.FgHiMagenta, color.Bold).SprintfFunc()
 	HiYellow := color.New(color.FgHiYellow, color.Bold).SprintfFunc()
-	fmt.Printf("[%s]: %s %s %s\n", HiBlue("URL"), HiMagenta(url) , "=>" , HiYellow(code))
+	fmt.Printf("[%s]: %s %s %s\n", HiBlue(tool), HiMagenta(url) , "=>" , HiYellow(code))
 }
 
 func contains(s []int, e int) bool {
@@ -165,14 +174,18 @@ func contains(s []int, e int) bool {
 	return false
 }
 
-
 func UpdateStats(status *CrawlerStatus, args CrawlerArguments){
 	prev_total_requests := 0
 	for {
 		time.Sleep(time.Second * 1)
 		if prev_total_requests > 0 {
-			status.request_per_second = status.total_requests - prev_total_requests
-			prev_total_requests = status.total_requests
+			if status.request_per_second == 0 {
+				status.request_per_second = status.total_requests - prev_total_requests
+				prev_total_requests = status.total_requests
+			}else{
+				status.request_per_second = (status.request_per_second + (status.total_requests - prev_total_requests))/2
+				prev_total_requests = status.total_requests
+			}
 		}else{
 			prev_total_requests = status.total_requests
 		}
@@ -183,7 +196,9 @@ func UpdateStats(status *CrawlerStatus, args CrawlerArguments){
 		for _ , code  := range status.pages{
 			if contains(args.valid_codes, code) {
 				status.total_ok++
-			}else if code == 302 || code == 304{
+			}
+
+			if code == 302 || code == 304{
 				status.total_redirect++
 			}
 		}
@@ -195,26 +210,107 @@ func ShouldGet(min, max int) bool {
 	return rand.Intn(max - min) + min > 0
 }
 
+func getTagInfo(token html.Token, base_url string) []string {
+	url_info, _ := url.Parse(base_url)
+	host  := url_info.Host
+	var attributes_val []string
+	for _, attr := range token.Attr {
+		if attr.Key == "href" {
+			val, err := url.ParseRequestURI(attr.Val)
+			if err != nil {
+				if attr.Val != "#" {
+					attributes_val = append(attributes_val, base_url+"/"+filepath.Dir(attr.Val))
+				}
+			}else{
+				if host == val.Host {
+					path := filepath.Dir(val.Path)
+					if len(path) > 1 {
+						attributes_val = append(attributes_val, url_info.Scheme+"://"+val.Host+path)
+					}
+				}
+			}
+		}
+
+		if attr.Key == "src" {
+			val, err := url.ParseRequestURI(attr.Val)
+			if err != nil {
+				if attr.Val != "#" {
+					attributes_val = append(attributes_val, base_url+"/"+filepath.Dir(attr.Val))
+				}
+			}else{
+				if host == val.Host {
+					path := filepath.Dir(val.Path)
+					if len(path) > 1 {
+						attributes_val = append(attributes_val, url_info.Scheme+"://"+val.Host+path)
+					}
+				}
+			}
+		}
+	}
+	return attributes_val
+}
+
+func s_contains(s []string, e string) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
+}
+
+func ScrapePage(in io.ReadCloser, res *map[string]string, url string) {
+	valid_tags := []string{"audio", "embed", "iframe", "img", "input", "script", "source", "track",
+		"video", "a", "area", "base","link"}
+
+	parser := html.NewTokenizer(in)
+	for {
+		next := parser.Next()
+
+		switch {
+		case next == html.ErrorToken:
+			return
+		case next == html.StartTagToken:
+			token := parser.Token()
+			if s_contains(valid_tags, token.Data) {
+				for _, v := range getTagInfo(token, url){
+					if len((*res)[v]) == 0 {
+						showURL(v, "200", "SCRAPER")
+						(*res)[v] = "200"
+					}
+				}
+			}
+		}
+	}
+}
+
 func Request(wg *sync.WaitGroup,ch chan map[string]string , args CrawlerArguments, dir string, status *CrawlerStatus, client *http.Client) {
-	url := args.crawl_url + "/" + dir
+	tmp_url := args.crawl_url + "/" + dir
 	var err error
 	var response *http.Response
 	var done bool = false
 	for !done {
-		if ShouldGet(-1, 1) {
-			response, err = client.Get(url)
-		} else {
-			response, err = client.Head(url)
+		if args.enable_scraper {
+			response, err = client.Get(tmp_url)
+		}else{
+			if ShouldGet(-1, 1) {
+				response, err = client.Get(tmp_url)
+			} else {
+				response, err = client.Head(tmp_url)
+			}
 		}
-		status.total_requests ++
 		result := make(map[string]string)
 		if err == nil {
 			defer response.Body.Close()
+			status.total_requests ++
 			if !contains(args.valid_codes, response.StatusCode) {
-				result[url] = ""
+				result[tmp_url] = ""
 			} else {
-				result[url] = strconv.Itoa(response.StatusCode)
-				showURL(url, strconv.Itoa(response.StatusCode))
+				if args.enable_scraper {
+					ScrapePage(response.Body, &result, tmp_url)
+				}
+				result[tmp_url] = strconv.Itoa(response.StatusCode)
+				showURL(tmp_url, strconv.Itoa(response.StatusCode), "BUSTER")
 			}
 			wg.Done()
 			ch <- result
@@ -230,7 +326,7 @@ func Dispose(args CrawlerArguments, ch chan map[string]string) []string {
 	for i:=0;i<args.max_concurrency;i++ {
 		select {
 		case res := <-ch:
-			for new_url,_ := range res {
+			for new_url := range res {
 				if len(res[new_url]) > 0 {
 					todo = append(todo, new_url)
 					val, _ := strconv.Atoi(res[new_url])
