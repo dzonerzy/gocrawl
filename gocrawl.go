@@ -36,6 +36,20 @@ func (i *acceptedStatus) Set(value string) error {
 	return nil
 }
 
+type neededCookies map[string]string
+
+func (c *neededCookies) String() string {
+	return fmt.Sprintf("%v", *c)
+}
+
+func (c *neededCookies) Set(value string) error {
+	name_val := strings.Split(value, "=")
+	if len(name_val) > 1 {
+		(*c)[name_val[0]] = name_val[1]
+	}
+	return nil
+}
+
 type CrawlerArguments struct {
 	crawl_url string
 	crawl_entries []string
@@ -45,6 +59,7 @@ type CrawlerArguments struct {
 	valid_codes acceptedStatus
 	enable_scraper bool
 	proxy string
+	needed_cookies []http.Cookie
 }
 
 type CrawlerStatus struct {
@@ -76,7 +91,9 @@ func main() {
 		proxy_setting = flag.String("proxy", "", "Specify HTTP proxy URL")
 	)
 	var acceptedCodes acceptedStatus
+	var cookies neededCookies = make(map[string]string)
 	flag.Var(&acceptedCodes, "c", "A list of HTTP status considered as 'page found' ie: 200,302,304,401")
+	flag.Var(&cookies, "cookie", "A list of Cookie used by application, format: name=value")
 
 	flag.Parse()
 
@@ -125,10 +142,15 @@ func main() {
 		showError("Error: Please set a concurrency value between 10 - 900")
 		os.Exit(-1)
 	}
+	var  app_cookies []http.Cookie
+
+	for key, val := range cookies {
+		app_cookies = append(app_cookies, http.Cookie{Name: key, Value: val})
+	}
 
 	arguments := CrawlerArguments{crawl_url: *crawl_url, crawl_entries: strings.Split(string(data), "\n"),
 		max_depth: *depth, concurrency:0, max_concurrency: *concurrent, valid_codes: acceptedCodes,
-		enable_scraper: *scraper}
+		enable_scraper: *scraper, needed_cookies: app_cookies}
 
 	if len(arguments.crawl_url) > 0 {
 		go UpdateStats(&status, arguments)
@@ -301,17 +323,22 @@ func Request(wg *sync.WaitGroup,ch chan map[string]string , args CrawlerArgument
 	tmp_url := args.crawl_url + "/" + dir
 	var err error
 	var response *http.Response
+	var req *http.Request
 	var done bool = false
 	for !done {
 		if args.enable_scraper {
-			response, err = client.Get(tmp_url)
+			req, err = http.NewRequest("GET", tmp_url, nil)
 		}else{
 			if ShouldGet(0, 2) {
-				response, err = client.Get(tmp_url)
+				req, err = http.NewRequest("GET", tmp_url, nil)
 			} else {
-				response, err = client.Head(tmp_url)
+				req, err = http.NewRequest("HEAD", tmp_url, nil)
 			}
 		}
+		for _, cookie := range args.needed_cookies {
+			req.AddCookie(&cookie)
+		}
+		response,err = client.Do(req)
 		result := make(map[string]string)
 		if err == nil {
 			defer response.Body.Close()
