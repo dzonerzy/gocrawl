@@ -44,6 +44,7 @@ type CrawlerArguments struct {
 	max_concurrency int
 	valid_codes acceptedStatus
 	enable_scraper bool
+	proxy string
 }
 
 type CrawlerStatus struct {
@@ -66,23 +67,16 @@ func main() {
 		TLSHandshakeTimeout: 5 * time.Second,
 	}
 
-	var netClient = &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Timeout: time.Second * 5,
-		Transport: netTransport,
-	}
-
 	var(
 		crawl_url = flag.String("url","", "Specify the url to crawl")
 		crawl_file = flag.String("wordlist", "", "Specify the wordlist used to crawl, if no specified the built-in one will be used")
 		depth = flag.Int("depth", 5, "Specify the maximum recursion depth")
 		concurrent = flag.Int("concurrency", 50, "Specify the concurrency connection at a time, a number between 10 and 900")
 		scraper = flag.Bool("scraper", false, "Specify whenever to enable scraper engine")
+		proxy_setting = flag.String("proxy", "", "Specify HTTP proxy URL")
 	)
 	var acceptedCodes acceptedStatus
-	flag.Var(&acceptedCodes, "c", "A list of HTTP considered as 'Page Found' ie: 200,302,304,401")
+	flag.Var(&acceptedCodes, "c", "A list of HTTP status considered as 'page found' ie: 200,302,304,401")
 
 	flag.Parse()
 
@@ -97,8 +91,26 @@ func main() {
 		os.Exit(-1)
 	}
 
+	if len(*proxy_setting) > 0 {
+		proxy_url, err := url.ParseRequestURI(*proxy_setting)
+
+		if err != nil {
+			showError(fmt.Sprintf("Please use a valid Proxy URL ( %v )", err))
+			os.Exit(-1)
+		}
+		netTransport.Proxy = http.ProxyURL(proxy_url)
+	}
+
+	var netClient = &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: time.Second * 5,
+		Transport: netTransport,
+	}
+
 	if len(acceptedCodes) == 0 {
-		showError("You must declare at least one valid code")
+		showError("You must declare at least one valid status code")
 		os.Exit(-1)
 	}
 
@@ -206,8 +218,9 @@ func UpdateStats(status *CrawlerStatus, args CrawlerArguments){
 }
 
 func ShouldGet(min, max int) bool {
-	rand.Seed(time.Now().Unix())
-	return rand.Intn(max - min) + min > 0
+	rand.Seed(time.Now().UnixNano())
+	i := rand.Intn(max - min) + min
+	return i > 0
 }
 
 func getTagInfo(token html.Token, base_url string) []string {
@@ -293,7 +306,7 @@ func Request(wg *sync.WaitGroup,ch chan map[string]string , args CrawlerArgument
 		if args.enable_scraper {
 			response, err = client.Get(tmp_url)
 		}else{
-			if ShouldGet(-1, 1) {
+			if ShouldGet(0, 2) {
 				response, err = client.Get(tmp_url)
 			} else {
 				response, err = client.Head(tmp_url)
