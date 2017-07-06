@@ -9,6 +9,8 @@ Usage of gocrawl:
     	A list of HTTP status considered as 'page found' ie: 200,302,304,401
   -concurrency int
     	Specify the concurrency connection at a time, a number between 10 and 900 (default 50)
+  -cookie value
+    	A list of Cookie used by application, format: name=value
   -depth int
     	Specify the maximum recursion depth (default 5)
   -proxy string
